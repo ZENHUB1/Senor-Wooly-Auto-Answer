@@ -1,0 +1,209 @@
+// ==UserScript==
+// @name         Screenshot → Gemini Auto-Clicker
+// @namespace    https://github.com/Hocker1900/Senor-Wooly-Auto-Answer-Bot
+// @version      3.0.0
+// @description  Captures screen, queries Gemini for the exact choice text, and automatically clicks the matching button on the page.
+// @author       Hocker1900 / Automation
+// @match        *://*/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// @connect      generativelanguage.googleapis.com
+// @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    "use strict";
+
+    var cachedBase64Image = null;
+    var isCapturing = false;
+    var isProcessing = false;
+
+    // Cleanup old instances
+    var old = document.getElementById("scgpt-panel");
+    if (old) old.remove();
+    if (window._scgptTimer) { clearTimeout(window._scgptTimer); window._scgptTimer = null; }
+
+    function css(obj) { return Object.entries(obj).map(function (e) { return e[0] + ":" + e[1]; }).join(";"); }
+    function btnStyle(bg, color) {
+        return css({ background: bg, border: "none", "border-radius": "6px", padding: "5px 11px", "font-weight": "bold", cursor: "pointer", "font-family": "Consolas,monospace", "font-size": "12px", color: color || "#1e1e2e" });
+    }
+
+    var panel = document.createElement("div");
+    panel.id = "scgpt-panel";
+    panel.setAttribute("style", css({ position: "fixed", bottom: "16px", right: "16px", "z-index": "999999", background: "#1e1e2e", border: "1px solid #45475a", "border-radius": "12px", padding: "14px 16px", "font-family": "Consolas,monospace", "font-size": "13px", color: "#cdd6f4", "box-shadow": "0 6px 28px rgba(0,0,0,.55)", width: "340px", "box-sizing": "border-box" }));
+
+    // Strict system prompt to ensure the AI only outputs the exact target text
+    var strictSystemPrompt = "Analyze the assignment question in the image. Identify the correct multiple choice answer option. Output ONLY the exact text string or word of that correct answer option. Do not include punctuation, explanations, introductions, or option letters like 'A)'. Your entire output must match the text on the button exactly.";
+
+    panel.innerHTML = [
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">',
+            '<span style="font-weight:bold;color:#cba6f7;font-size:14px;">Gemini Auto-Clicker</span>',
+            '<div style="display:flex;gap:6px;">',
+                '<button id="scgpt-minimize" style="' + btnStyle("#45475a", "#cdd6f4") + '">—</button>',
+                '<button id="scgpt-close"    style="' + btnStyle("#f38ba8") + '">✕</button>',
+            '</div>',
+        '</div>',
+        '<div id="scgpt-body">',
+            '<div style="display:flex;gap:6px;align-items:center;margin-bottom:10px;">',
+                '<button id="scgpt-snap" style="' + btnStyle("#a6e3a1") + '">📸 Snap</button>',
+                '<button id="scgpt-ask"  style="' + btnStyle("#89b4fa") + '">🤖 Auto-Solve & Click</button>',
+                '<button id="scgpt-key"  style="' + btnStyle("#f9e2af") + '">⚙️ API Key</button>',
+            '</div>',
+            '<div id="scgpt-status" style="font-size:11px;color:#6c7086;margin-bottom:6px;">Ready. Configure your API Key first.</div>',
+            '<div id="scgpt-output" style="background:#181825;border-radius:8px;padding:10px;min-height:40px;font-size:13px;color:#cdd6f4;border:1px solid #313244;"><span style="color:#45475a;">Target option text will appear here...</span></div>',
+        '</div>'
+    ].join("");
+
+    document.body.appendChild(panel);
+
+    var askBtn    = document.getElementById("scgpt-ask");
+    var snapBtn   = document.getElementById("scgpt-snap");
+    var keyBtn    = document.getElementById("scgpt-key");
+    var statusEl  = document.getElementById("scgpt-status");
+    var outputEl  = document.getElementById("scgpt-output");
+    var body      = document.getElementById("scgpt-body");
+    var minimized = false;
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+    function setOutput(html) { outputEl.innerHTML = html; }
+
+    document.getElementById("scgpt-minimize").onclick = function () {
+        minimized = !minimized;
+        body.style.display = minimized ? "none" : "";
+        this.textContent = minimized ? "+" : "—";
+    };
+
+    document.getElementById("scgpt-close").onclick = function () { panel.remove(); };
+
+    keyBtn.onclick = function() {
+        var currentKey = GM_getValue("gemini_api_key", "");
+        var newKey = prompt("Enter your Gemini API Key:", currentKey);
+        if (newKey !== null) {
+            GM_setValue("gemini_api_key", newKey.trim());
+            setStatus("API Key saved!");
+        }
+    };
+
+    function takeSnapshot() {
+        if (isCapturing) return Promise.resolve(cachedBase64Image);
+        isCapturing = true;
+        return new Promise(function (resolve, reject) {
+            setStatus("Capturing viewport...");
+            panel.style.display = "none";
+
+            html2canvas(document.body, {
+                useCORS: true,
+                allowTaint: true,
+                scale: 1,
+                logging: false,
+                ignoreElements: function(element) { return element && element.id === "scgpt-panel"; }
+            })
+            .then(function (canvas) {
+                panel.style.display = "";
+                var rawB64 = canvas.toDataURL("image/png").split(",")[1];
+                cachedBase64Image = rawB64;
+                setStatus("Snapshot cached.");
+                isCapturing = false;
+                resolve(rawB64);
+            })
+            .catch(function (e) {
+                panel.style.display = "";
+                isCapturing = false;
+                reject(e);
+            });
+        });
+    }
+
+    snapBtn.onclick = function() { takeSnapshot(); };
+
+    // ── DOM Scraper and Click Executor ───────────────────────────────────────
+    function clickMatchingElement(targetText) {
+        var cleanedTarget = targetText.trim().toLowerCase();
+        // Look for common multiple choice interactive elements
+        var selectors = "button, [role='button'], input[type='button'], .option, .choice, span, div";
+        var elements = document.querySelectorAll(selectors);
+        var found = false;
+
+        for (var i = 0; i < elements.length; i++) {
+            var el = elements[i];
+            // Skip elements inside our own control panel
+            if (panel.contains(el)) continue;
+
+            var elText = el.innerText || el.textContent || "";
+            if (elText.trim().toLowerCase() === cleanedTarget) {
+                setOutput('Found matching element: <span style="color:#a6e3a1;">' + elText + '</span>. Clicking...');
+                el.click();
+                found = true;
+                break; // Click the first exact match found
+            }
+        }
+
+        if (!found) {
+            setStatus("Text parsed, but no matching clickable button found on page.");
+        }
+    }
+
+    function doAsk() {
+        var apiKey = GM_getValue("gemini_api_key", "");
+        if (!apiKey) { setStatus("Error: API Key is empty!"); return Promise.resolve(); }
+
+        if (!cachedBase64Image) {
+            return takeSnapshot().then(function(b64) { if (b64) return doAsk(); });
+        }
+
+        if (isProcessing) return Promise.resolve();
+        isProcessing = true;
+        askBtn.disabled = true;
+        setOutput('<span style="color:#45475a;">Querying Gemini for correct answer...</span>');
+
+        var payload = {
+            contents: [{
+                parts: [
+                    { text: strictSystemPrompt },
+                    { inlineData: { mimeType: "image/png", data: cachedBase64Image } }
+                ]
+            }]
+        };
+
+        return new Promise(function(resolve, reject) {
+            GM_xmlhttpRequest({
+                method: "POST",
+                url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey,
+                headers: { "Content-Type": "application/json" },
+                data: JSON.stringify(payload),
+                onload: function(response) {
+                    isProcessing = false;
+                    askBtn.disabled = false;
+                    try {
+                        var json = JSON.parse(response.responseText);
+                        if (json.candidates && json.candidates[0].content.parts[0].text) {
+                            var answerText = json.candidates[0].content.parts[0].text.trim();
+                            setOutput('Gemini selected: <b>' + answerText + '</b>');
+                            setStatus("Clicking match...");
+
+                            // Clear cache so the next question takes a new picture
+                            cachedBase64Image = null;
+
+                            // Execute the automatic click layout sweep
+                            clickMatchingElement(answerText);
+                            resolve();
+                        } else {
+                            reject(new Error("Empty response or invalid JSON architecture."));
+                        }
+                    } catch (e) { reject(e); }
+                },
+                onerror: function(err) {
+                    isProcessing = false;
+                    askBtn.disabled = false;
+                    reject(err);
+                }
+            });
+        }).catch(function(err) {
+            setStatus("Error processing: " + err.message);
+        });
+    }
+
+    askBtn.onclick = doAsk;
+})();
