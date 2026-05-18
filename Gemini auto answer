@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Screenshot → Gemini Auto-Clicker
+// @name         Señor Wooly Auto-Solver (Enterprise Edition - Forest Glow v8.0.4)
 // @namespace    https://github.com/Hocker1900/Senor-Wooly-Auto-Answer-Bot
-// @version      3.0.0
-// @description  Captures screen, queries Gemini for the exact choice text, and automatically clicks the matching button on the page.
-// @author       Hocker1900 / Automation
+// @version      8.0.4
+// @description  Hardened automation engine featuring rate-limit mitigation (429 handling), real-time text alignment, and high-stability DOM tracking.
+// @author       Hocker1900 / Enterprise Automation Team
 // @match        *://*/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -16,194 +16,560 @@
 (function () {
     "use strict";
 
-    var cachedBase64Image = null;
-    var isCapturing = false;
-    var isProcessing = false;
-
-    // Cleanup old instances
-    var old = document.getElementById("scgpt-panel");
-    if (old) old.remove();
-    if (window._scgptTimer) { clearTimeout(window._scgptTimer); window._scgptTimer = null; }
-
-    function css(obj) { return Object.entries(obj).map(function (e) { return e[0] + ":" + e[1]; }).join(";"); }
-    function btnStyle(bg, color) {
-        return css({ background: bg, border: "none", "border-radius": "6px", padding: "5px 11px", "font-weight": "bold", cursor: "pointer", "font-family": "Consolas,monospace", "font-size": "12px", color: color || "#1e1e2e" });
-    }
-
-    var panel = document.createElement("div");
-    panel.id = "scgpt-panel";
-    panel.setAttribute("style", css({ position: "fixed", bottom: "16px", right: "16px", "z-index": "999999", background: "#1e1e2e", border: "1px solid #45475a", "border-radius": "12px", padding: "14px 16px", "font-family": "Consolas,monospace", "font-size": "13px", color: "#cdd6f4", "box-shadow": "0 6px 28px rgba(0,0,0,.55)", width: "340px", "box-sizing": "border-box" }));
-
-    // Strict system prompt to ensure the AI only outputs the exact target text
-    var strictSystemPrompt = "Analyze the assignment question in the image. Identify the correct multiple choice answer option. Output ONLY the exact text string or word of that correct answer option. Do not include punctuation, explanations, introductions, or option letters like 'A)'. Your entire output must match the text on the button exactly.";
-
-    panel.innerHTML = [
-        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">',
-            '<span style="font-weight:bold;color:#cba6f7;font-size:14px;">Gemini Auto-Clicker</span>',
-            '<div style="display:flex;gap:6px;">',
-                '<button id="scgpt-minimize" style="' + btnStyle("#45475a", "#cdd6f4") + '">—</button>',
-                '<button id="scgpt-close"    style="' + btnStyle("#f38ba8") + '">✕</button>',
-            '</div>',
-        '</div>',
-        '<div id="scgpt-body">',
-            '<div style="display:flex;gap:6px;align-items:center;margin-bottom:10px;">',
-                '<button id="scgpt-snap" style="' + btnStyle("#a6e3a1") + '">📸 Snap</button>',
-                '<button id="scgpt-ask"  style="' + btnStyle("#89b4fa") + '">🤖 Auto-Solve & Click</button>',
-                '<button id="scgpt-key"  style="' + btnStyle("#f9e2af") + '">⚙️ API Key</button>',
-            '</div>',
-            '<div id="scgpt-status" style="font-size:11px;color:#6c7086;margin-bottom:6px;">Ready. Configure your API Key first.</div>',
-            '<div id="scgpt-output" style="background:#181825;border-radius:8px;padding:10px;min-height:40px;font-size:13px;color:#cdd6f4;border:1px solid #313244;"><span style="color:#45475a;">Target option text will appear here...</span></div>',
-        '</div>'
-    ].join("");
-
-    document.body.appendChild(panel);
-
-    var askBtn    = document.getElementById("scgpt-ask");
-    var snapBtn   = document.getElementById("scgpt-snap");
-    var keyBtn    = document.getElementById("scgpt-key");
-    var statusEl  = document.getElementById("scgpt-status");
-    var outputEl  = document.getElementById("scgpt-output");
-    var body      = document.getElementById("scgpt-body");
-    var minimized = false;
-
-    function setStatus(msg) { statusEl.textContent = msg; }
-    function setOutput(html) { outputEl.innerHTML = html; }
-
-    document.getElementById("scgpt-minimize").onclick = function () {
-        minimized = !minimized;
-        body.style.display = minimized ? "none" : "";
-        this.textContent = minimized ? "+" : "—";
-    };
-
-    document.getElementById("scgpt-close").onclick = function () { panel.remove(); };
-
-    keyBtn.onclick = function() {
-        var currentKey = GM_getValue("gemini_api_key", "");
-        var newKey = prompt("Enter your Gemini API Key:", currentKey);
-        if (newKey !== null) {
-            GM_setValue("gemini_api_key", newKey.trim());
-            setStatus("API Key saved!");
-        }
-    };
-
-    function takeSnapshot() {
-        if (isCapturing) return Promise.resolve(cachedBase64Image);
-        isCapturing = true;
-        return new Promise(function (resolve, reject) {
-            setStatus("Capturing viewport...");
-            panel.style.display = "none";
-
-            html2canvas(document.body, {
-                useCORS: true,
-                allowTaint: true,
-                scale: 1,
-                logging: false,
-                ignoreElements: function(element) { return element && element.id === "scgpt-panel"; }
-            })
-            .then(function (canvas) {
-                panel.style.display = "";
-                var rawB64 = canvas.toDataURL("image/png").split(",")[1];
-                cachedBase64Image = rawB64;
-                setStatus("Snapshot cached.");
-                isCapturing = false;
-                resolve(rawB64);
-            })
-            .catch(function (e) {
-                panel.style.display = "";
-                isCapturing = false;
-                reject(e);
-            });
-        });
-    }
-
-    snapBtn.onclick = function() { takeSnapshot(); };
-
-    // ── DOM Scraper and Click Executor ───────────────────────────────────────
-    function clickMatchingElement(targetText) {
-        var cleanedTarget = targetText.trim().toLowerCase();
-        // Look for common multiple choice interactive elements
-        var selectors = "button, [role='button'], input[type='button'], .option, .choice, span, div";
-        var elements = document.querySelectorAll(selectors);
-        var found = false;
-
-        for (var i = 0; i < elements.length; i++) {
-            var el = elements[i];
-            // Skip elements inside our own control panel
-            if (panel.contains(el)) continue;
-
-            var elText = el.innerText || el.textContent || "";
-            if (elText.trim().toLowerCase() === cleanedTarget) {
-                setOutput('Found matching element: <span style="color:#a6e3a1;">' + elText + '</span>. Clicking...');
-                el.click();
-                found = true;
-                break; // Click the first exact match found
+    // ─── ENTERPRISE CONFIGURATION CONSTANTS ──────────────────────────────────────
+    const CONFIG = {
+        API: {
+            BASE_URL: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            PRO_URL:  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+            MAX_RETRIES: 3,
+            TIMEOUT: 15000,
+            TEMPERATURE: 0.1
+        },
+        DOM: {
+            CONFIRM_TIMEOUT: 1500,
+            STABILITY_INTERVAL: 50,
+            MIN_MOVE_DELAY: 200,
+            MAX_MOVE_DELAY: 600,
+            PADDING_DELAY: 80
+        },
+        SCREENSHOT: {
+            SCALE: 0.75,
+            QUALITY: 0.8
+        },
+        UI: {
+            PANEL_ID: "sw-enterprise-panel",
+            LOG_PANEL_ID: "sw-telemetry-panel",
+            THEME: {
+                bg: "#0d1f14",        // Deep Forest Obsidian
+                border: "#1b432a",    // Dark Emerald Border
+                text: "#e1ebe4",      // Soft Mint Text
+                subtext: "#73937e",   // Muted Sage Subtext
+                accent: "#f1c40f",    // Vibrant Gold Accent
+                success: "#2ecc71",   // Forest Green Success
+                info: "#3498db",      // Deep Sea Blue
+                warning: "#e67e22",   // Amber Warning
+                critical: "#e74c3c"   // Crimson Alert
             }
         }
+    };
 
-        if (!found) {
-            setStatus("Text parsed, but no matching clickable button found on page.");
+    // ─── DYNAMIC LIGHTING ANIMATION STYLESHEET ───────────────────────────────────
+    const injectDynamicLightingEngine = () => {
+        if (document.getElementById("sw-lighting-matrix")) return;
+        const styleNode = document.createElement("style");
+        styleNode.id = "sw-lighting-matrix";
+        styleNode.textContent = `
+            @keyframes sw-ambient-pulse {
+                0% { box-shadow: 0 8px 32px rgba(13, 31, 20, 0.6), 0 0 10px rgba(46, 204, 113, 0.2); border-color: #1b432a; }
+                50% { box-shadow: 0 8px 32px rgba(13, 31, 20, 0.8), 0 0 25px rgba(46, 204, 113, 0.55), 0 0 5px rgba(241, 196, 15, 0.2); border-color: #27613d; }
+                100% { box-shadow: 0 8px 32px rgba(13, 31, 20, 0.6), 0 0 10px rgba(46, 204, 113, 0.2); border-color: #1b432a; }
+            }
+            .sw-interactive-btn {
+                transition: transform 0.1s ease, filter 0.15s ease, box-shadow 0.15s ease !important;
+            }
+            .sw-interactive-btn:hover {
+                filter: brightness(1.15);
+                transform: translateY(-1px);
+                box-shadow: 0 0 12px rgba(241, 196, 15, 0.4);
+            }
+            .sw-interactive-btn:active {
+                transform: translateY(1px);
+            }
+        `;
+        document.head.appendChild(styleNode);
+    };
+
+    // ─── CENTRALIZED APPLICATION STATE MACHINE ───────────────────────────────────
+    const AppState = {
+        _internal: {
+            isBusy: false,
+            cachedB64: null,
+            moveDelay: 350,
+            delayHistory: [],
+            totalSolved: parseInt(GM_getValue("sw_total", "0"), 10),
+            solveLog: JSON.parse(GM_getValue("sw_log", "[]"))
+        },
+        get(key) { return this._internal[key]; },
+        set(key, val) {
+            this._internal[key] = val;
+            if (key === "totalSolved") GM_setValue("sw_total", String(val));
+            if (key === "solveLog") GM_setValue("sw_log", JSON.stringify(val));
         }
-    }
+    };
 
-    function doAsk() {
-        var apiKey = GM_getValue("gemini_api_key", "");
-        if (!apiKey) { setStatus("Error: API Key is empty!"); return Promise.resolve(); }
-
-        if (!cachedBase64Image) {
-            return takeSnapshot().then(function(b64) { if (b64) return doAsk(); });
+    // ─── STRUCTURED TELEMETRY & LOGGING SYSTEM ───────────────────────────────────
+    const Telemetry = {
+        log(component, msg, color = CONFIG.UI.THEME.text) {
+            console.log(`%c[SW-ENGINE][${component}] ${msg}`, `color: ${color}; font-weight: bold;`);
+        },
+        warn(component, msg) {
+            console.warn(`[SW-ENGINE][${component}] ⚠️ ${msg}`);
+        },
+        error(component, msg, err) {
+            console.error(`[SW-ENGINE][${component}] ❌ ${msg}`, err);
         }
+    };
 
-        if (isProcessing) return Promise.resolve();
-        isProcessing = true;
-        askBtn.disabled = true;
-        setOutput('<span style="color:#45475a;">Querying Gemini for correct answer...</span>');
+    // ─── CRYPTO & STORAGE DATA ACCESS LAYER ──────────────────────────────────────
+    const DAL = {
+        getApiKey: () => GM_getValue("sw_api_key", ""),
+        setApiKey: (key) => GM_setValue("sw_api_key", key),
+        isProEnabled: () => GM_getValue("sw_pro", "0") === "1"
+    };
 
-        var payload = {
-            contents: [{
-                parts: [
-                    { text: strictSystemPrompt },
-                    { inlineData: { mimeType: "image/png", data: cachedBase64Image } }
-                ]
-            }]
-        };
+    // ─── UI CONTROLLER MODULE ────────────────────────────────────────────────────
+    const UIEngine = {
+        updateStatus(msg, hexColor = CONFIG.UI.THEME.text) {
+            const el = document.getElementById("sw-status-text");
+            if (el) { el.textContent = msg; el.style.color = hexColor; }
+        },
+        updateSubStatus(msg) {
+            const el = document.getElementById("sw-substatus-text");
+            if (el) el.textContent = msg;
+        },
+        updateCounter() {
+            const el = document.getElementById("sw-counter-display");
+            if (el) el.textContent = `${AppState.get("totalSolved")} solved`;
+        },
+        renderInterface() {
+            document.getElementById(CONFIG.UI.PANEL_ID)?.remove();
+            injectDynamicLightingEngine();
+            
+            const panel = document.createElement("div");
+            panel.id = CONFIG.UI.PANEL_ID;
+            panel.style.cssText = `
+                position: fixed; bottom: 16px; right: 16px; z-index: 999999;
+                background: ${CONFIG.UI.THEME.bg}; border: 1px solid ${CONFIG.UI.THEME.border}; border-radius: 12px;
+                padding: 14px 16px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px;
+                color: ${CONFIG.UI.THEME.text}; width: 320px; box-sizing: border-box;
+                user-select: none; transition: transform 0.2s ease;
+                animation: sw-ambient-pulse 4s infinite ease-in-out;
+            `;
 
-        return new Promise(function(resolve, reject) {
-            GM_xmlhttpRequest({
-                method: "POST",
-                url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey,
-                headers: { "Content-Type": "application/json" },
-                data: JSON.stringify(payload),
-                onload: function(response) {
-                    isProcessing = false;
-                    askBtn.disabled = false;
-                    try {
-                        var json = JSON.parse(response.responseText);
-                        if (json.candidates && json.candidates[0].content.parts[0].text) {
-                            var answerText = json.candidates[0].content.parts[0].text.trim();
-                            setOutput('Gemini selected: <b>' + answerText + '</b>');
-                            setStatus("Clicking match...");
+            const btnStyle = (bg, textColor = "#0d1f14") => `
+                background: ${bg}; border: none; border-radius: 6px; padding: 6px 10px;
+                font-weight: bold; cursor: pointer; font-family: inherit; font-size: 11px; color: ${textColor};
+            `;
 
-                            // Clear cache so the next question takes a new picture
-                            cachedBase64Image = null;
+            panel.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid ${CONFIG.UI.THEME.border}; padding-bottom: 6px;">
+                    <span style="font-weight: bold; color: ${CONFIG.UI.THEME.accent}; font-size: 13px;">SW-Engine v8.0.4 RateArmor</span>
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                        <span id="sw-counter-display" style="font-size: 10px; color: ${CONFIG.UI.THEME.subtext};">${AppState.get("totalSolved")} solved</span>
+                        <button id="sw-btn-min" class="sw-interactive-btn" style="${btnStyle(CONFIG.UI.THEME.border, CONFIG.UI.THEME.text)}; padding: 2px 6px;">—</button>
+                        <button id="sw-btn-close" class="sw-interactive-btn" style="${btnStyle(CONFIG.UI.THEME.critical, CONFIG.UI.THEME.text)}; padding: 2px 6px;">✕</button>
+                    </div>
+                </div>
+                <div id="sw-panel-body">
+                    <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px;">
+                        <button id="sw-btn-snap" class="sw-interactive-btn" style="${btnStyle(CONFIG.UI.THEME.success)}">📸 Snap</button>
+                        <button id="sw-btn-solve" class="sw-interactive-btn" style="${btnStyle(CONFIG.UI.THEME.accent)}">🤖 Solve</button>
+                        <button id="sw-btn-log" class="sw-interactive-btn" style="${btnStyle(CONFIG.UI.THEME.info, CONFIG.UI.THEME.text)}">📋 Log</button>
+                        <button id="sw-btn-key" class="sw-interactive-btn" style="${btnStyle(CONFIG.UI.THEME.warning, CONFIG.UI.THEME.text)}">⚙️ Key</button>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; background: rgba(255,255,255,0.03); padding: 6px; border-radius: 6px;">
+                        <label style="font-size: 10px; color: ${CONFIG.UI.THEME.subtext}; cursor: pointer;" for="sw-chk-pro">Pro Refined</label>
+                        <input type="checkbox" id="sw-chk-pro" ${DAL.isProEnabled() ? "checked" : ""} style="cursor: pointer; accent-color: ${CONFIG.UI.THEME.accent};">
+                        <div style="flex-grow: 1;"></div>
+                        <label style="font-size: 10px; color: ${CONFIG.UI.THEME.subtext};" for="sw-rng-speed">Speed</label>
+                        <input type="range" id="sw-rng-speed" min="150" max="600" value="${AppState.get("moveDelay")}" style="width: 70px; cursor: pointer; accent-color: ${CONFIG.UI.THEME.accent};">
+                        <span id="sw-txt-speed" style="font-size: 10px; color: ${CONFIG.UI.THEME.subtext}; width: 35px; text-align: right;">${AppState.get("moveDelay")}ms</span>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.25); padding: 8px; border-radius: 6px; border-left: 3px solid ${CONFIG.UI.THEME.accent};">
+                        <div id="sw-status-text" style="font-size: 11px; min-height: 16px; font-weight: bold;">System Operational.</div>
+                        <div id="sw-substatus-text" style="font-size: 10px; color: ${CONFIG.UI.THEME.subtext}; min-height: 14px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></div>
+                    </div>
+                </div>
+            `;
 
-                            // Execute the automatic click layout sweep
-                            clickMatchingElement(answerText);
-                            resolve();
-                        } else {
-                            reject(new Error("Empty response or invalid JSON architecture."));
-                        }
-                    } catch (e) { reject(e); }
-                },
-                onerror: function(err) {
-                    isProcessing = false;
-                    askBtn.disabled = false;
-                    reject(err);
+            document.body.appendChild(panel);
+            this.bindEvents();
+        },
+        bindEvents() {
+            document.getElementById("sw-btn-snap").addEventListener("click", async () => {
+                if (AppState.get("isBusy")) return;
+                AppState.set("isBusy", true);
+                await Pipeline.captureTelemetryScreen();
+                AppState.set("isBusy", false);
+            });
+            document.getElementById("sw-btn-solve").addEventListener("click", Pipeline.executeCoreOrchestration);
+            document.getElementById("sw-btn-log").addEventListener("click", this.renderTelemetryLogs);
+            document.getElementById("sw-btn-key").addEventListener("click", () => {
+                const currentKey = DAL.getApiKey();
+                const newKey = prompt("[SECURITY] Enter Gemini API Gateway Token:", currentKey);
+                if (newKey !== null) {
+                    DAL.setApiKey(newKey.trim());
+                    this.updateStatus("Token saved.", CONFIG.UI.THEME.success);
                 }
             });
-        }).catch(function(err) {
-            setStatus("Error processing: " + err.message);
-        });
-    }
+            document.getElementById("sw-chk-pro").addEventListener("change", (e) => {
+                GM_setValue("sw_pro", e.target.checked ? "1" : "0");
+                Telemetry.log("UI", `Pro models allocated for failover routing: ${e.target.checked}`);
+            });
+            document.getElementById("sw-rng-speed").addEventListener("input", (e) => {
+                const val = parseInt(e.target.value, 10);
+                AppState.set("moveDelay", val);
+                document.getElementById("sw-txt-speed").textContent = `${val}ms`;
+            });
+            document.getElementById("sw-btn-min").addEventListener("click", () => {
+                const body = document.getElementById("sw-panel-body");
+                body.style.display = body.style.display === "none" ? "" : "none";
+            });
+            document.getElementById("sw-btn-close").addEventListener("click", () => {
+                document.getElementById(CONFIG.UI.LOG_PANEL_ID)?.remove();
+                document.getElementById(CONFIG.UI.PANEL_ID)?.remove();
+                Telemetry.log("UI", "Application interface runtime unmounted safely.");
+            });
+        },
+        renderTelemetryLogs() {
+            const logs = AppState.get("solveLog");
+            if (!logs.length) { UIEngine.updateStatus("Logs unpopulated.", CONFIG.UI.THEME.accent); return; }
 
-    askBtn.onclick = doAsk;
+            document.getElementById(CONFIG.UI.LOG_PANEL_ID)?.remove();
+            const logPanel = document.createElement("div");
+            logPanel.id = CONFIG.UI.LOG_PANEL_ID;
+            logPanel.style.cssText = `
+                position: fixed; bottom: 16px; right: 346px; z-index: 999999;
+                background: ${CONFIG.UI.THEME.bg}; border: 1px solid ${CONFIG.UI.THEME.border}; border-radius: 12px;
+                padding: 14px 16px; font-family: inherit; font-size: 11px;
+                color: ${CONFIG.UI.THEME.text}; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+                width: 290px; max-height: 380px; overflow-y: auto; box-sizing: border-box;
+                animation: sw-ambient-pulse 4s infinite ease-in-out;
+            `;
+
+            logPanel.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <span style="color: ${CONFIG.UI.THEME.accent}; font-weight: bold;">Telemetry Audit Trails</span>
+                    <button id="sw-log-close" class="sw-interactive-btn" style="background: ${CONFIG.UI.THEME.critical}; color: #fff; border: none; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 10px;">✕</button>
+                </div>
+                <div id="sw-log-rows"></div>
+            `;
+
+            document.body.appendChild(logPanel);
+            document.getElementById("sw-log-close").addEventListener("click", () => logPanel.remove());
+
+            const container = document.getElementById("sw-log-rows");
+            logs.forEach(entry => {
+                const div = document.createElement("div");
+                div.style.cssText = `border-top: 1px solid ${CONFIG.UI.THEME.border}; padding: 6px 0; line-height: 1.4;`;
+                if (entry.type === "lyrics") {
+                    const lines = Array.isArray(entry.result)
+                        ? entry.result.map((t, i) => `<span style="color:${CONFIG.UI.THEME.subtext}">${i + 1}.</span> ${t.slice(0, 32)}...`).join("<br>")
+                        : "";
+                    div.innerHTML = `<span style="color: ${CONFIG.UI.THEME.info}">[${entry.ts}]</span> Structural Match → [${entry.order?.join(",")}]<br>${lines}`;
+                } else {
+                    div.innerHTML = `<span style="color: ${CONFIG.UI.THEME.info}">[${entry.ts}]</span> Vision Classifier → "${entry.answer}"`;
+                }
+                container.appendChild(div);
+            });
+        }
+    };
+
+    // ─── DOM INVERSION & PARSING ENGINE ──────────────────────────────────────────
+    const DOMEngine = {
+        scrapeLyricDataMatrix() {
+            return [...document.querySelectorAll("li[id^='answer-option-']")].map((li, visualIndex) => {
+                const text = li.querySelector("p[lang]")?.textContent?.trim() ?? `[Node Sequence Context ${visualIndex + 1}]`;
+                const column = li.querySelector("div.flex.h-full.flex-col.items-center");
+                const triggers = column ? [...column.querySelectorAll("button[data-disable-dragndrop='true']")] : [];
+                return { visualIndex, text, upActionNode: triggers[0] ?? null };
+            });
+        },
+        harvestEnvironmentMetadata() {
+            const urlPathStrings = window.location.pathname.split('/').filter(Boolean).join(' ');
+            return {
+                title: document.title ?? "Null Context Title",
+                uri: window.location.href ?? "Null Context URI",
+                urlContext: urlPathStrings,
+                header: document.querySelector("h1, h2, [class*='title']")?.textContent?.trim() ?? "No Class Headers",
+                bodyScrapedText: document.body.innerText?.slice(0, 600) ?? ""
+            };
+        },
+        evaluateRuntimePuzzleMode() {
+            if (this.scrapeLyricDataMatrix().length > 1) return "lyrics";
+            const candidateButtons = [...document.querySelectorAll("button")]
+                .filter(b => !b.closest(`#${CONFIG.UI.PANEL_ID}`) && b.textContent.trim().length > 2);
+            return candidateButtons.length > 0 ? "mc" : null;
+        },
+        async monitorStateStability(previousChecksum) {
+            const evaluationStart = performance.now();
+            while (performance.now() - evaluationStart < CONFIG.DOM.CONFIRM_TIMEOUT) {
+                await new Promise(r => setTimeout(r, CONFIG.DOM.STABILITY_INTERVAL));
+                const baselineMatrix = this.scrapeLyricDataMatrix();
+                if (baselineMatrix[0]?.text !== previousChecksum) {
+                    const executionDelta = Math.round(performance.now() - evaluationStart);
+                    this.recalibrateAdaptiveDelay(executionDelta);
+                    return true;
+                }
+            }
+            return false;
+        },
+        recalibrateAdaptiveDelay(delta) {
+            const historicalBuffer = AppState.get("delayHistory");
+            historicalBuffer.push(delta);
+            if (historicalBuffer.length > 8) historicalBuffer.shift();
+            AppState.set("delayHistory", historicalBuffer);
+            
+            const statisticalMean = historicalBuffer.reduce((a, b) => a + b, 0) / historicalBuffer.length;
+            const optimizedDelay = Math.min(CONFIG.DOM.MAX_MOVE_DELAY, Math.max(CONFIG.DOM.MIN_MOVE_DELAY, Math.round(statisticalMean + CONFIG.DOM.PADDING_DELAY)));
+            AppState.set("moveDelay", optimizedDelay);
+            UIEngine.updateSubStatus(`⚡ Sync stabilized: ${optimizedDelay}ms`);
+        }
+    };
+
+    // ─── HTTP GATEWAY NETWORK LAYER (GEMINI API) ─────────────────────────────────
+    const NetworkGateway = {
+        postRpcExchange(payloadParts, forceProAllocation = false) {
+            return new Promise((resolve, reject) => {
+                const clientSecret = DAL.getApiKey();
+                if (!clientSecret) { return reject(new Error("API Client Secret missing. Please update Key gateway.")); }
+                
+                const targetEndpoint = (forceProAllocation ? CONFIG.API.PRO_URL : CONFIG.API.BASE_URL) + `?key=${clientSecret}`;
+                
+                Telemetry.log("API", `Initiating transmission to routing hub... [Pro=${forceProAllocation}]`, CONFIG.UI.THEME.info);
+                
+                GM_xmlhttpRequest({
+                    method: "POST",
+                    url: targetEndpoint,
+                    headers: { "Content-Type": "application/json" },
+                    timeout: CONFIG.API.TIMEOUT,
+                    data: JSON.stringify({
+                        contents: [{ parts: payloadParts }],
+                        generationConfig: { temperature: CONFIG.API.TEMPERATURE }
+                    }),
+                    onload(response) {
+                        if (response.status !== 200) {
+                            return reject(new Error(`Upstream RPC Fault ${response.status}: ${response.responseText || "Empty Node Body"}`));
+                        }
+                        try {
+                            const parsedResponse = JSON.parse(response.responseText);
+                            if (parsedResponse.error) { return reject(new Error(`Internal Model Exception: ${parsedResponse.error.message}`)); }
+                            const payloadContent = parsedResponse.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+                            if (!payloadContent) { return reject(new Error("Empty pipeline frame candidates returned.")); }
+                            resolve(payloadContent);
+                        } catch (parseEx) {
+                            reject(new Error(`JSON Engine Parsing Collapse: ${parseEx.message}`));
+                        }
+                    },
+                    onerror(netErr) { reject(new Error(`Gateway Network Transmit Collapse: ${netErr.statusText || "Host Unreachable"}`)); },
+                    ontimeout() { reject(new Error(`Upstream RPC Timeout threshold reached (${CONFIG.API.TIMEOUT}ms)`)); }
+                });
+            });
+        },
+        async robustPostRpcExchangeWithFailover(payloadParts) {
+            let systematicErrors;
+            for (let operationalAttempt = 1; operationalAttempt <= CONFIG.API.MAX_RETRIES; operationalAttempt++) {
+                try {
+                    const routingCondition = operationalAttempt > 1 || DAL.isProEnabled();
+                    return await this.postRpcExchange(payloadParts, routingCondition);
+                } catch (caughtEx) {
+                    systematicErrors = caughtEx;
+                    
+                    // Emergency Mitigation Frame: Handle HTTP 429 Rate Limits Gracefully
+                    if (caughtEx.message.includes("429")) {
+                        Telemetry.warn("API", `Rate limit ceiling hit on attempt ${operationalAttempt}. Triggering cooling window.`);
+                        UIEngine.updateStatus("Rate Limited (429)", CONFIG.UI.THEME.warning);
+                        
+                        // Force an exponential cooling pause (4 seconds, 8 seconds, etc.)
+                        const coolingDuration = 4000 * operationalAttempt;
+                        UIEngine.updateSubStatus(`Cooling engine parameters... Waiting ${coolingDuration / 1000}s`);
+                        await new Promise(r => setTimeout(r, coolingDuration));
+                    } else {
+                        Telemetry.warn("API", `Transmission path dropped on attempt ${operationalAttempt}. Re-routing packets...`);
+                        if (operationalAttempt < CONFIG.API.MAX_RETRIES) {
+                            await new Promise(r => setTimeout(r, 1000 * operationalAttempt));
+                        }
+                    }
+                }
+            }
+            throw systematicErrors;
+        }
+    };
+
+    // ─── INPUT DATA TRANSFORM SANITIZATION & DE-SERIALIZATION ────────────────────
+    const DataSanitizer = {
+        stripMarkdownCodeFences(rawPayloadString) {
+            let processedString = rawPayloadString.trim();
+            if (processedString.startsWith("```json")) processedString = processedString.substring(7);
+            else if (processedString.startsWith("```")) processedString = processedString.substring(3);
+            if (processedString.endsWith("```")) processedString = processedString.substring(0, processedString.length - 3);
+            return processedString.trim();
+        },
+        validateMatrixIndexParity(calculatedOrder, targetLength) {
+            if (!Array.isArray(calculatedOrder) || calculatedOrder.length !== targetLength) return false;
+            return [...calculatedOrder].sort((a, b) => a - b).every((value, idx) => value === idx + 1);
+        }
+    };
+
+    // ─── DISCRETE PIPELINE ORCHESTRATION ENGINE ──────────────────────────────────
+    const Pipeline = {
+        async captureTelemetryScreen() {
+            UIEngine.updateStatus("Capturing VRAM...", CONFIG.UI.THEME.warning);
+            try {
+                const visualBufferCanvas = await html2canvas(document.body, {
+                    useCORS: true,
+                    scale: CONFIG.SCREENSHOT.SCALE,
+                    logging: false,
+                    ignoreElements: el => el.id === CONFIG.UI.PANEL_ID || el.id === CONFIG.UI.LOG_PANEL_ID
+                });
+                const dynamicB64Stream = visualBufferCanvas.toDataURL("image/jpeg", CONFIG.SCREENSHOT.QUALITY).split(",")[1];
+                AppState.set("cachedB64", dynamicB64Stream);
+                UIEngine.updateStatus("VRAM Synchronized.", CONFIG.UI.THEME.success);
+            } catch (ex) {
+                Telemetry.error("SCREEN", "Hardware virtualization capture failure.", ex);
+                UIEngine.updateStatus("VRAM Sync Failure.", CONFIG.UI.THEME.critical);
+            }
+        },
+        async processMatrixArrangementPipeline() {
+            const nodeMatrix = DOMEngine.scrapeLyricDataMatrix();
+            if (!nodeMatrix.length) { UIEngine.updateStatus("Node Array Empty.", CONFIG.UI.THEME.critical); return; }
+
+            UIEngine.updateStatus("Parsing Node Vectors...", CONFIG.UI.THEME.accent);
+            const contextVector = DOMEngine.harvestEnvironmentMetadata();
+            
+            const sequencePrompt = 
+                `You are an expert on Señor Wooly (senorwooly.com) educational Spanish songs.\n` +
+                `These lyric lines belong to a specific Señor Wooly song puzzle. They are currently scrambled:\n\n` +
+                nodeMatrix.map((r, i) => `${i + 1}. ${r.text}`).join("\n") + `\n\nPage Context Clues:\n` +
+                `Page Title: ${contextVector.title}\nURL: ${contextVector.uri}\nClean URL Path: ${contextVector.urlContext}\nHeading: ${contextVector.header}\nPage Text Snippet: ${contextVector.bodyScrapedText}\n\n` +
+                `Identify the exact Señor Wooly story/song, match these lines to the official lyrics database, and determine their correct chronological sequence.\n` +
+                `Reply with ONLY a raw JSON array of the current position numbers (1-based) representing the correct sorted order from first to last lyric line.\n` +
+                `Example — if line 3 should be first, line 1 second, line 2 third: [3,1,2]\n` +
+                `No explanation. No markdown. No code fences. Raw JSON only.`;
+
+            const rpcRawDataString = await NetworkGateway.robustPostRpcExchangeWithFailover([{ text: sequencePrompt }]);
+            let resolvedOrderMatrix;
+
+            try {
+                resolvedOrderMatrix = JSON.parse(DataSanitizer.stripMarkdownCodeFences(rpcRawDataString));
+            } catch (ex) {
+                UIEngine.updateStatus("Deserialization Fault.", CONFIG.UI.THEME.critical);
+                return;
+            }
+
+            if (!DataSanitizer.validateMatrixIndexParity(resolvedOrderMatrix, nodeMatrix.length)) {
+                UIEngine.updateStatus("Integrity Failure.", CONFIG.UI.THEME.critical);
+                return;
+            }
+
+            UIEngine.updateStatus("Mutating DOM Nodes...", CONFIG.UI.THEME.accent);
+            await Pipeline.dispatchDomTransformEngine(resolvedOrderMatrix, nodeMatrix);
+
+            const postEvaluationState = DOMEngine.scrapeLyricDataMatrix().map(r => r.text);
+            const internalLogs = AppState.get("solveLog");
+            internalLogs.unshift({ type: "lyrics", order: resolvedOrderMatrix, result: postEvaluationState, ts: new Date().toLocaleTimeString() });
+            if (internalLogs.length > 20) internalLogs.pop();
+            AppState.set("solveLog", internalLogs);
+            AppState.set("totalSolved", AppState.get("totalSolved") + 1);
+
+            UIEngine.updateCounter();
+            UIEngine.updateStatus("Sequence Optimized.", CONFIG.UI.THEME.success);
+            UIEngine.updateSubStatus("DOM Sync Verified.");
+        },
+        async dispatchDomTransformEngine(targetMatrixMapping, initialNodeMatrix) {
+            const desiredTextSequence = targetMatrixMapping.map(oneBasedIdx => initialNodeMatrix[oneBasedIdx - 1].text);
+            
+            let maxSafetyIterations = 35; 
+            while (maxSafetyIterations-- > 0) {
+                const currentMatrix = DOMEngine.scrapeLyricDataMatrix();
+                let modificationFired = false;
+                
+                for (let t = 0; t < desiredTextSequence.length; t++) {
+                    const targetText = desiredTextSequence[t];
+                    const currentVisualIdx = currentMatrix.findIndex(item => item.text === targetText);
+                    
+                    if (currentVisualIdx !== t && currentVisualIdx > 0) {
+                        const triggerButton = currentMatrix[currentVisualIdx].upActionNode;
+                        if (triggerButton && triggerButton.getAttribute("aria-disabled") !== "true") {
+                            const preClickTextBaseline = currentMatrix[0].text;
+                            triggerButton.click();
+                            
+                            await DOMEngine.monitorStateStability(preClickTextBaseline);
+                            await new Promise(r => setTimeout(r, AppState.get("moveDelay") / 2));
+                            modificationFired = true;
+                            break; 
+                        }
+                    }
+                }
+                
+                if (!modificationFired) {
+                    Telemetry.log("DOM", "Visual elements align with target text matrix map.");
+                    break;
+                }
+            }
+        },
+        async processVisionClassifierPipeline() {
+            await Pipeline.captureTelemetryScreen();
+            const memoryStreamFrame = AppState.get("cachedB64");
+            if (!memoryStreamFrame) { UIEngine.updateStatus("VRAM Stream Null.", CONFIG.UI.THEME.critical); return; }
+
+            UIEngine.updateStatus("Classification Engine Boot...", CONFIG.UI.THEME.info);
+            
+            const classificationPromptPayload = [
+                { text: "Analyze this assignment question. Output ONLY the exact text of the correct answer option. No letter prefix, no punctuation, no explanation. Match the button text exactly." },
+                { inline_data: { mime_type: "image/jpeg", data: memoryStreamFrame } }
+            ];
+
+            const machineClassificationOutput = await NetworkGateway.robustPostRpcExchangeWithFailover(classificationPromptPayload);
+            AppState.set("cachedB64", null);
+
+            UIEngine.updateStatus(`Vision Matched: "${machineClassificationOutput.slice(0,15)}..."`, CONFIG.UI.THEME.accent);
+
+            const documentInteractiveButtons = [...document.querySelectorAll("button")].filter(b => !b.closest(`#${CONFIG.UI.PANEL_ID}`));
+            const lowerInvariantMatchStr = machineClassificationOutput.toLowerCase().trim();
+
+            const preciseNodeTarget = 
+                documentInteractiveButtons.find(b => b.textContent.trim() === machineClassificationOutput) ||
+                documentInteractiveButtons.find(b => b.textContent.trim().toLowerCase() === lowerInvariantMatchStr) ||
+                documentInteractiveButtons.find(b => b.textContent.trim().toLowerCase().includes(lowerInvariantMatchStr));
+
+            if (preciseNodeTarget) {
+                preciseNodeTarget.scrollIntoView({ behavior: "smooth", block: "center" });
+                await new Promise(r => setTimeout(r, 200));
+                preciseNodeTarget.click();
+
+                const internalLogs = AppState.get("solveLog");
+                internalLogs.unshift({ type: "mc", answer: machineClassificationOutput, ts: new Date().toLocaleTimeString() });
+                if (internalLogs.length > 20) internalLogs.pop();
+                AppState.set("solveLog", internalLogs);
+                AppState.set("totalSolved", AppState.get("totalSolved") + 1);
+
+                UIEngine.updateCounter();
+                UIEngine.updateStatus("Automation Fired.", CONFIG.UI.THEME.success);
+            } else {
+                UIEngine.updateStatus("Node Match Failed.", CONFIG.UI.THEME.critical);
+                UIEngine.updateSubStatus("Execute manual screenshot verification.");
+            }
+        },
+        async executeCoreOrchestration() {
+            if (AppState.get("isBusy")) { return; }
+            AppState.set("isBusy", true);
+            
+            Telemetry.log("CORE", "Initializing runtime loop process isolation...");
+            
+            try {
+                const targetedRuntimeMode = DOMEngine.evaluateRuntimePuzzleMode();
+                if (targetedRuntimeMode === "lyrics") {
+                    await Pipeline.processMatrixArrangementPipeline();
+                } else if (targetedRuntimeMode === "mc") {
+                    await Pipeline.processVisionClassifierPipeline();
+                } else {
+                    UIEngine.updateStatus("Target Matrix Void.", CONFIG.UI.THEME.critical);
+                }
+            } catch (pipelineException) {
+                Telemetry.error("CORE", "Fatal loop crash caught in environment boundary box.", pipelineException);
+                UIEngine.updateStatus(`Engine Fault: ${pipelineException.message.slice(0, 24)}`, CONFIG.UI.THEME.critical);
+                UIEngine.updateSubStatus("Inspect DevTools console framework logs.");
+            } finally {
+                AppState.set("isBusy", false);
+            }
+        }
+    };
+
+    // ─── RUNTIME MAIN KERNEL INITIALIZATION ──────────────────────────────────────
+    (function bootstrapKernel() {
+        Telemetry.log("CORE", "Allocating hardware profiles, linking memory threads...", CONFIG.UI.THEME.accent);
+        UIEngine.renderInterface();
+    })();
+
 })();
